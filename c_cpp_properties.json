@@ -1,0 +1,15 @@
+{
+    "configurations": [
+        {
+            "name": "OMNeT++",
+            "compilerPath": "D:/omnetpp-6.4.0/tools/win32.x86_64/clang64/bin/g++.exe",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "D:/omnetpp-6.4.0/include"
+            ],
+            "cppStandard": "c++17",
+            "intelliSenseMode": "windows-gcc-x64"
+        }
+    ],
+    "version": 4
+}
