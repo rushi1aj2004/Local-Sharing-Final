@@ -87,7 +87,7 @@ class OLT : public cSimpleModule
     void sendGrantForONU(int onuId, long grantBytes);
 
     void selectInitialLocalSharingGroup();
-    void scheduleInitialLocalSharing();
+    
     bool scheduleDynamicLocalSharing();
     
 
@@ -286,10 +286,7 @@ void OLT::initialize()
 }
 
 
-bool OLT::hasDownstreamConflict(
-    int candidateId,
-    SimTime windowStart,
-    SimTime windowEnd)
+bool OLT::hasDownstreamConflict(int candidateId,SimTime windowStart,SimTime windowEnd)
 {
     if (candidateId < 0 ||
         candidateId >= static_cast<int>(nextSlotAtSplitter.size()))
@@ -489,203 +486,24 @@ void OLT::selectInitialLocalSharingGroup()
                 << endl;
     }
 
-    phase = SchedulerPhase::INITIAL_LOCAL_SHARING;
-    scheduleAt(simTime(), scheduleMsg);
-}
-
-
-// Schedule five contributors sequentially on the LS path,
-// then schedule the Host after their packets can arrive.
-void OLT::scheduleInitialLocalSharing()
-{
-    if (phase != SchedulerPhase::INITIAL_LOCAL_SHARING)
-        return;
-
     SimTime now = simTime();
 
-    SimTime lsCursor = now;
-    SimTime latestLSArrivalAtHost = now;
+    horizonLS = now + SimTime(125, SIMTIME_US);
 
-    long expectedForwardBytes = 0;
+    horizonUP = now
+            + SimTime(125, SIMTIME_US)
+            + SimTime(20, SIMTIME_US)
+            + SimTime(125, SIMTIME_US);
 
-    SimTime reportTxTime =
-        secondsToSimTime(reportSizeBytes * 8.0 / dataRate);
-
-    // A Mode 1 contributor sends its DATA and then its REPORT
-    // through the Local Sharing path.
-    for (int rank = 1; rank < 6; rank++)
-    {
-        int contributorId = initialLSGroup[rank];
-
-        long grantBytes =
-            alignedGrantBytes(queueBytes[contributorId]);
-
-        SimTime dataTxTime =
-            secondsToSimTime(grantBytes * 8.0 / dataRate);
-
-        SimTime contributorDelay =
-            secondsToSimTime(rnToONUDelays[contributorId]);
-
-        SimTime hostDelay =
-            secondsToSimTime(rnToONUDelays[initialHostId]);
-
-        // Earliest arrival at the Splitter if the contributor
-        // starts as soon as its broadcast GATE reaches it.
-        SimTime earliestSplitterArrival =
-            now
-            + secondsToSimTime(oltToRNDelay)
-            + contributorDelay
-            + contributorDelay;
-
-        SimTime lsStartAtSplitter =
-            std::max(lsCursor, earliestSplitterArrival);
-
-        // GATE reaches ONU after OLT->Splitter and Splitter->ONU.
-        // DATA then travels ONU->Splitter.
-        SimTime delayAfterGrant =
-            lsStartAtSplitter
-            - now
-            - secondsToSimTime(oltToRNDelay)
-            - contributorDelay
-            - contributorDelay;
-
-        if (delayAfterGrant < SIMTIME_ZERO)
-            delayAfterGrant = SIMTIME_ZERO;
-
-        SimTime contributorBurstDuration =
-            dataTxTime + reportTxTime;
-
-        sendGrantMessage(
-            contributorId,
-            grantBytes,
-            1,
-            initialHostId,
-            contributorBurstDuration.dbl(),
-            delayAfterGrant
-        );
-
-        // The Host receives the reflected packets after the
-        // Splitter->Host propagation delay.
-        SimTime reportArrivalAtHost =
-            lsStartAtSplitter
-            + contributorBurstDuration
-            + hostDelay;
-
-        latestLSArrivalAtHost =
-            std::max(latestLSArrivalAtHost, reportArrivalAtHost);
-
-        // Reserve the LS wavelength through DATA + REPORT + guard.
-        lsCursor =
-            lsStartAtSplitter
-            + contributorBurstDuration
-            + guardTime;
-
-        // Upper bound on bytes the Host must forward.
-        expectedForwardBytes += grantBytes + reportSizeBytes;
-
-        EV_INFO << "\nScheduled LS contributor " << contributorId
-                << "\nHost = " << initialHostId
-                << "\nGrant bytes = " << grantBytes
-                << "\nLS start at Splitter = " << lsStartAtSplitter
-                << "\nExpected REPORT arrival at Host = "
-                << reportArrivalAtHost
-                << "\nLS reservation end = " << lsCursor
-                << endl;
-    }
-
-    horizonLS = lsCursor;
-
-    // The Host can start only after its GATE arrives and all
-    // scheduled contributor packets can have reached its LS buffer.
-    SimTime hostGateArrival =
-        now
-        + secondsToSimTime(oltToRNDelay)
-        + secondsToSimTime(rnToONUDelays[initialHostId]);
-
-    SimTime hostSendStart =
-        std::max(hostGateArrival, latestLSArrivalAtHost);
-
-    //Update HorizonUP to make a gap of 125 us between the last contributor's report and the data arrival at OLT from the Host.NEWADDITION
-    horizonUP=latestLSArrivalAtHost + SimTime(125, SIMTIME_US);
-    // Keep the UP path collision-free as well.
-    SimTime hostUpstreamPropagation =
-        secondsToSimTime(
-            oltToRNDelay + rnToONUDelays[initialHostId]
-        );
-
-    if (hostSendStart + hostUpstreamPropagation < horizonUP)
-    {
-        hostSendStart = horizonUP - hostUpstreamPropagation;
-
-        if (hostSendStart < hostGateArrival)
-            hostSendStart = hostGateArrival;
-    }
-
-    SimTime hostDelayAfterGrant =
-        hostSendStart - hostGateArrival;
-    //EV_INFO << "Host GATE arrives at " << hostDelayAfterGrant << " us after GATE reception" << endl;
-    if (hostDelayAfterGrant < SIMTIME_ZERO)
-        hostDelayAfterGrant = SIMTIME_ZERO;
-
-    // Mode 2 grant covers only the Host's own DATA.
-    // Forwarded packets are accounted for separately in time.
-    long hostGrantBytes =
-        alignedGrantBytes(queueBytes[initialHostId]);
-
-    SimTime hostOwnDataTime =
-        secondsToSimTime(hostGrantBytes * 8.0 / dataRate);
-
-    // The Host forwards contributor DATA and REPORT packets
-    // sequentially, before sending its own DATA and REPORT.
-    SimTime forwardingTime =
-        secondsToSimTime(expectedForwardBytes * 8.0 / dataRate);
-
-    SimTime hostFirstArrivalAtOLT =
-        hostSendStart + hostUpstreamPropagation;
-
-    horizonUP =
-        hostFirstArrivalAtOLT
-        + forwardingTime
-        + hostOwnDataTime
-        + reportTxTime
-        + guardTime;
-
-    SimTime totalInitialLSDuration =
-        horizonLS - now;
-
-    sendGrantMessage(
-        initialHostId,
-        hostGrantBytes,
-        2,
-        -1,
-        totalInitialLSDuration.dbl(),
-        hostDelayAfterGrant
-    );
-
-    // The initial reports for the committed Host/group are consumed.
-    isScheduled[initialHostId] = true;
-    for (int rank = 1; rank < 6; rank++)
-        isScheduled[initialLSGroup[rank]] = true;
-
-    EV_INFO << "\n=== INITIAL SCHEDULING COMPLETE ==="
-            << "\nNext LS scheduling time = "
-            << horizonLS - SimTime(125, SIMTIME_US)
-            << "\nUP horizon = " << horizonUP
-            << "\nLS horizon = " << horizonLS
+    EV_INFO << "\n=== INITIAL LS HORIZONS ==="
+            << "\nHorizon_LS = " << horizonLS
+            << "\nHorizon_UP = " << horizonUP
             << endl;
-    EV_INFO << "\n=== INITIAL LOCAL SHARING SCHEDULED ==="
-            << "\nHost = " << initialHostId
-            << "\nHost own grant = " << hostGrantBytes << " bytes"
-            << "\nExpected forwarded bytes = "
-            << expectedForwardBytes
-            << "\nExpected Host start = " << hostSendStart
-            << "\nLatest contributor REPORT at Host = "
-            << latestLSArrivalAtHost
-            << "\nLS horizon = " << horizonLS
-            << "\nUP horizon = " << horizonUP
-            << endl;
+
+    // Enter the existing dynamic scheduling logic.
+    phase = SchedulerPhase::STEADY_STATE;
+    scheduleAt(now, scheduleMsg);
 }
-
 
 // Dynamic upstream-only Local Sharing scheduler.
 // Returns true only when an LS group reservation was committed.
@@ -697,16 +515,9 @@ bool OLT::scheduleDynamicLocalSharing()
         secondsToSimTime(reportSizeBytes * 8.0 / dataRate);
 
     
-    SimTime maxDownstreamEnd = SIMTIME_ZERO;
-
-    for (const auto& slot : nextSlotAtSplitter)
-    {
-        if (slot.end > maxDownstreamEnd)
-            maxDownstreamEnd = slot.end;
-    }
-
+    
     //The LS window is measured at the Splitter/RN.
-    SimTime rightLimit = std::min(horizonUP - jitOffset,maxDownstreamEnd);//right limit of the LS window is the minimum of the UP horizon and the end of the last downstream burst at the Splitter
+    SimTime rightLimit = horizonUP - jitOffset;//right limit of the LS window is the minimum of the UP horizon and the end of the last downstream burst at the Splitter
     SimTime deltaTLS = rightLimit - horizonLS;
 
     EV_INFO << "\nDynamic LS window"
@@ -761,7 +572,23 @@ bool OLT::scheduleDynamicLocalSharing()
                 << endl;
         return false;
     }
+    SimTime maxDownstreamEnd = SIMTIME_ZERO;
 
+    for (const auto& slot : nextSlotAtSplitter)
+    {
+        if (slot.end > maxDownstreamEnd)
+            maxDownstreamEnd = slot.end;
+    }
+
+    rightLimit = std::min(rightLimit, maxDownstreamEnd);
+    deltaTLS = rightLimit - horizonLS;
+
+    if (deltaTLS <= 2 * guardTime)
+    {
+        EV_INFO << "No usable LS window; waiting for a fresh REPORT."
+                << endl;
+        return false;
+    }
     // Stage B: eligible Host candidates are fresh, unconsumed reports
     // with at least one complete DATA packet available for a grant.
     std::vector<int> candidates;
@@ -1368,44 +1195,7 @@ void OLT::handleMessage(cMessage *msg)
             return;
         }
 
-        // ========================================
-        // PHASE 2: INITIAL LOCAL SHARING
-        // ========================================
-        if (phase == SchedulerPhase::INITIAL_LOCAL_SHARING)
-        {
-            EV_INFO << "\n=== INITIAL LOCAL SHARING ==="
-                    << endl;
-
-            // Calculate the initial schedule, send the grants,
-            // and establish horizonLS and horizonUP.
-            scheduleInitialLocalSharing();
-
-            // Initialization is complete once the schedule has
-            // been calculated and the reservations established.
-            phase = SchedulerPhase::STEADY_STATE;
-
-            SimTime nextScheduleTime =
-                horizonLS - SimTime(125, SIMTIME_US);
-
-            if (nextScheduleTime <= simTime())
-            {
-                throw cRuntimeError(
-                    "Next LS scheduling deadline is not in the future. "
-                    "Check the initial LS reservation and 125us lead time."
-                );
-            }
-
-            EV_INFO << "\nInitial scheduling complete"
-                    << "\nNext LS scheduling time = "
-                    << nextScheduleTime
-                    << "\nHorizon LS = " << horizonLS
-                    << "\nHorizon UP = " << horizonUP
-                    << endl;
-
-            scheduleAt(nextScheduleTime, scheduleMsg);
-
-            return;
-        }
+        
 
         // ========================================
         // PHASE 3: DYNAMIC LOCAL SHARING
